@@ -1,7 +1,7 @@
-replicate==1.3.0
-pillow==10.1.0
-opencv-python==4.8.1.78
-SpeechRecognition==3.10.0
-pydub==0.25.1
-requests==2.31.0
-numpy==1.24.3
+replicate>=1.0.7
+pillow>=10.1.0
+opencv-python>=4.8.1.78
+SpeechRecognition>=3.10.0
+pydub>=0.25.1
+requests>=2.31.0
+numpy>=1.26.0
