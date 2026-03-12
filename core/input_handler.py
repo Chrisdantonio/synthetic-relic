@@ -1,11 +1,10 @@
 # core/input_handler.py
 """
-Handles user input: drawing and voice.
+Handles user input: voice capture with animated listening indicator.
 """
 
 import cv2
 import numpy as np
-from pathlib import Path
 import threading
 import time
 import logging
@@ -21,225 +20,160 @@ import config
 logger = logging.getLogger(__name__)
 
 
-class DrawingCapture:
-    """Captures drawing input from mouse on a canvas."""
-    
-    def __init__(self, width=config.CANVAS_WIDTH, height=config.CANVAS_HEIGHT):
-        self.width = width
-        self.height = height
-        self.canvas = np.ones((height, width, 3), dtype=np.uint8) * 255
-        self.canvas[:] = config.CANVAS_BACKGROUND
-        
-        self.drawing = False
-        self.last_point = None
-        self.points = []
-        
-        self.window_name = "Draw Your Vision (15 seconds)"
-    
-    def mouse_callback(self, event, x, y, flags, param):
-        """Handle mouse events on canvas."""
-        if event == cv2.EVENT_LBUTTONDOWN:
-            self.drawing = True
-            self.last_point = (x, y)
-        
-        elif event == cv2.EVENT_MOUSEMOVE:
-            if self.drawing and self.last_point:
-                cv2.line(
-                    self.canvas,
-                    self.last_point,
-                    (x, y),
-                    config.DRAWING_COLOR,
-                    config.BRUSH_SIZE
-                )
-                self.last_point = (x, y)
-                self.points.append((x, y))
-        
-        elif event == cv2.EVENT_LBUTTONUP:
-            self.drawing = False
-            self.last_point = None
-    
-    def capture(self) -> Path:
-        """
-        Show interactive drawing canvas with Continue button.
-        No time limit - user controls when to proceed.
-        
-        Returns:
-            Path to saved drawing image
-        """
-        
-        logger.info(f"🎨 Drawing canvas open. Click 'Continue' when done...")
-        
-        cv2.namedWindow(self.window_name)
-        cv2.setMouseCallback(self.window_name, self.mouse_callback)
-        
-        button_clicked = False
-        
-        while not button_clicked:
-            # Display canvas with button
-            display = self.canvas.copy()
-            
-            # Draw "Continue" button
-            button_x, button_y = 20, self.height - 60
-            button_w, button_h = 150, 50
-            cv2.rectangle(display, (button_x, button_y), (button_x + button_w, button_y + button_h), (50, 150, 50), -1)
-            cv2.putText(
-                display,
-                "Continue",
-                (button_x + 30, button_y + 35),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (255, 255, 255),
-                2
-            )
-            
-            # Add instructions
-            cv2.putText(
-                display,
-                "Click and drag to draw. Click Continue when done.",
-                (20, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (100, 100, 100),
-                1
-            )
-            
-            cv2.imshow(self.window_name, display)
-            key = cv2.waitKey(30)
-            
-            # Check for mouse click on button (through callback)
-            if self._button_clicked(button_x, button_y, button_w, button_h):
-                button_clicked = True
-        
-        cv2.destroyWindow(self.window_name)
-        
-        # Save drawing
-        output_path = config.GALLERY_PATH / "temp_drawing.png"
-        cv2.imwrite(str(output_path), self.canvas)
-        
-        logger.info(f"✅ Drawing saved to {output_path}")
-        
-        return output_path
-    
-    def _button_clicked(self, x, y, w, h) -> bool:
-        """Check if last mouse click was on the button."""
-        if not self.points:
-            return False
-        last_point = self.points[-1]
-        return x <= last_point[0] <= x + w and y <= last_point[1] <= y + h
-    
-    def analyze(self) -> dict:
-        """Analyze the drawing for metadata."""
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(self.canvas, cv2.COLOR_BGR2GRAY)
-        
-        # Detect edges
-        edges = cv2.Canny(gray, 100, 200)
-        
-        # Calculate complexity
-        edge_pixels = np.sum(edges > 0)
-        total_pixels = edges.size
-        edge_density = edge_pixels / total_pixels
-        
-        if edge_density > 0.15:
-            complexity = "complex, detailed"
-        elif edge_density > 0.05:
-            complexity = "moderate"
-        else:
-            complexity = "simple, minimal"
-        
-        # Dominant colors (simplified)
-        hsv = cv2.cvtColor(self.canvas, cv2.COLOR_BGR2HSV)
-        
-        return {
-            'complexity': complexity,
-            'edge_density': edge_density,
-            'num_strokes': len(self.points),
-        }
-
-
 class VoiceCapture:
-    """Captures and transcribes voice input."""
-    
+    """
+    Captures and transcribes voice input.
+    Shows an animated OpenCV listening indicator on the main thread
+    while voice recording runs in a background thread.
+    """
+
     def __init__(self):
         self.recognizer = sr.Recognizer() if SPEECH_RECOGNITION_AVAILABLE else None
-    
+
     def capture(self) -> str:
         """
-        Listen for voice input with start/stop buttons.
-        No time limit - user controls recording duration.
-        
-        Returns:
-            Transcribed text
+        Listen for voice input and show a live listening indicator.
+        Returns transcribed text.
         """
-        
+
         if not config.ENABLE_VOICE:
             logger.info("🔇 Voice capture disabled in config")
             return "[voice disabled]"
-        
+
         if not SPEECH_RECOGNITION_AVAILABLE:
-            logger.warning("⚠️  SpeechRecognition not installed. Skipping voice.")
+            logger.warning("⚠️  SpeechRecognition not installed.")
             return "[speech_recognition not installed]"
-        
+
         if not self.recognizer:
             logger.warning("⚠️  Could not initialize speech recognizer.")
             return "[recognizer failed]"
-        
-        logger.info(f"🎤 Listening for voice input...")
-        logger.info("📢 Speak clearly. Silence ends recording.")
-        
-        try:
-            with sr.Microphone() as source:
-                # Adjust for ambient noise once
-                logger.info("🔧 Adjusting for ambient noise...")
-                self.recognizer.adjust_for_ambient_noise(source, duration=2)
-                
-                logger.info("🎤 Listening... speak now (recording until silence)")
-                # Listen with generous time - will stop when silence detected
-                audio = self.recognizer.listen(source, timeout=10, phrase_time_limit=20)
-            
-            # Transcribe
-            logger.info("🔄 Transcribing...")
-            text = self.recognizer.recognize_google(audio)
-            
-            logger.info(f"✅ Transcribed: '{text}'")
-            return text
-        
-        except sr.UnknownValueError:
-            logger.warning("⚠️  Could not understand audio. Returning empty string.")
-            return "[unclear]"
-        
-        except sr.RequestError as e:
-            logger.warning(f"⚠️  API error: {e}. Check internet connection.")
-            return "[api_error]"
-        
-        except Exception as e:
-            logger.warning(f"⚠️  Voice capture failed: {e}")
-            return "[voice_failed]"
+
+        # Shared state between threads
+        result = [None]
+        state = ["starting"]   # starting → adjusting → listening → transcribing → done
+        error = [None]
+
+        def voice_thread():
+            try:
+                with sr.Microphone() as source:
+                    state[0] = "adjusting"
+                    logger.info("🔧 Adjusting for ambient noise...")
+                    self.recognizer.adjust_for_ambient_noise(source, duration=2)
+
+                    state[0] = "listening"
+                    logger.info("🎤 Listening... speak now")
+                    audio = self.recognizer.listen(source, timeout=10, phrase_time_limit=20)
+
+                state[0] = "transcribing"
+                logger.info("🔄 Transcribing...")
+                result[0] = self.recognizer.recognize_google(audio)
+                logger.info(f"✅ Transcribed: '{result[0]}'")
+
+            except sr.UnknownValueError:
+                logger.warning("⚠️  Could not understand audio.")
+                result[0] = "[unclear]"
+            except sr.RequestError as e:
+                logger.warning(f"⚠️  API error: {e}")
+                result[0] = "[api_error]"
+            except Exception as e:
+                logger.warning(f"⚠️  Voice capture failed: {e}")
+                result[0] = "[voice_failed]"
+            finally:
+                state[0] = "done"
+
+        # Start voice recording in background
+        t = threading.Thread(target=voice_thread, daemon=True)
+        t.start()
+
+        # Animate on main thread while recording
+        self._show_listening_animation(state)
+
+        t.join(timeout=35)
+        return result[0] or "[voice_failed]"
+
+    def _show_listening_animation(self, state: list):
+        """
+        Show an animated OpenCV window reflecting microphone state.
+        Runs on the main thread (required for OpenCV GUI on macOS).
+        """
+
+        W, H = 600, 280
+        window_name = "Synthetic Relic - Listening"
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(window_name, W, H)
+
+        start_time = time.time()
+
+        while state[0] != "done":
+            elapsed = time.time() - start_time
+            img = np.ones((H, W, 3), dtype=np.uint8) * 238
+
+            cur = state[0]
+
+            if cur == "starting":
+                label = "Initializing microphone..."
+                color = (160, 160, 160)
+                pulse_speed = 1.5
+
+            elif cur == "adjusting":
+                label = "Calibrating for room noise..."
+                color = (50, 180, 220)   # amber-ish blue
+                pulse_speed = 2.0
+
+            elif cur == "listening":
+                label = "Listening  -  speak now"
+                color = (50, 190, 80)    # green
+                pulse_speed = 2.5
+
+            else:  # transcribing
+                label = "Processing..."
+                color = (80, 130, 220)   # blue
+                pulse_speed = 3.0
+
+            # Pulsing outer ring
+            pulse = 0.5 + 0.5 * np.sin(elapsed * pulse_speed * np.pi)
+            outer_r = int(52 + 12 * pulse)
+            inner_r = 38
+            cx, cy = W // 2, H // 2 - 20
+
+            cv2.circle(img, (cx, cy), outer_r, tuple(int(c * 0.5) for c in color), 2, cv2.LINE_AA)
+            cv2.circle(img, (cx, cy), inner_r, color, -1, cv2.LINE_AA)
+
+            # Mic symbol (simple rectangle + stand)
+            mic_w, mic_h = 12, 18
+            cv2.rectangle(img,
+                          (cx - mic_w // 2, cy - mic_h // 2),
+                          (cx + mic_w // 2, cy + mic_h // 2),
+                          (255, 255, 255), -1)
+            cv2.rectangle(img,
+                          (cx - mic_w // 2, cy - mic_h // 2),
+                          (cx + mic_w // 2, cy + mic_h // 2),
+                          (200, 200, 200), 1)
+            # Stand
+            cv2.line(img, (cx, cy + mic_h // 2), (cx, cy + mic_h // 2 + 8), (255, 255, 255), 2)
+            cv2.line(img, (cx - 8, cy + mic_h // 2 + 8), (cx + 8, cy + mic_h // 2 + 8), (255, 255, 255), 2)
+
+            # Label
+            (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
+            cv2.putText(img, label, ((W - lw) // 2, cy + 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (60, 60, 60), 2)
+
+            # Animated dots when listening
+            if cur == "listening":
+                dot_count = int(elapsed * 1.5) % 4
+                dots = "." * dot_count
+                (dw, _), _ = cv2.getTextSize(dots, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
+                cv2.putText(img, dots, ((W + lw) // 2 + 8, cy + 80),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (50, 190, 80), 2)
+
+            cv2.imshow(window_name, img)
+            cv2.waitKey(33)   # ~30 fps
+
+        cv2.destroyWindow(window_name)
 
 
 class InputManager:
-    """Orchestrates drawing and voice input capture."""
-    
+    """Orchestrates voice input capture."""
+
     def __init__(self):
-        self.drawing_capture = DrawingCapture()
         self.voice_capture = VoiceCapture() if config.ENABLE_VOICE else None
-    
-    def capture_both(self) -> tuple:
-        """
-        Capture drawing and voice input (no time limits).
-        
-        Returns:
-            (drawing_path, voice_text, drawing_analysis)
-        """
-        
-        logger.info("📥 Starting input capture...")
-        
-        # Drawing first (no time limit - button controlled)
-        drawing_path = self.drawing_capture.capture()
-        drawing_analysis = self.drawing_capture.analyze()
-        
-        # Then voice (no time limit - speech ends naturally)
-        voice_text = self.voice_capture.capture() if self.voice_capture else ""
-        
-        return drawing_path, voice_text, drawing_analysis

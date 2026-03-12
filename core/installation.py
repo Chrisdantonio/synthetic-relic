@@ -1,6 +1,6 @@
 # core/installation.py
 """
-Main installation orchestrator: coordinates all components.
+Main orchestrator: voice → Quick Draw sketch → animated reveal.
 """
 
 import json
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import config
 from core.input_handler import InputManager
-from core.api_client import ReplicateClient
+from core.api_client import QuickDrawRenderer
 from core.ui import AnimationDisplay, GalleryDisplay
 
 logger = logging.getLogger(__name__)
@@ -20,163 +20,140 @@ logger = logging.getLogger(__name__)
 
 class SyntheticRelicInstallation:
     """Main orchestrator for the installation."""
-    
+
     def __init__(self):
         self.gallery_path = config.GALLERY_PATH
         self.input_manager = InputManager()
-        self.api_client = ReplicateClient()
+        self.renderer = QuickDrawRenderer()
         self.display = AnimationDisplay()
         self.gallery_display = GalleryDisplay()
-        
         self.current_session = None
-        
         logger.info("🚀 Synthetic Relic initialized")
-    
+
     def create_session(self) -> Path:
-        """Create a timestamped folder for this interaction."""
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         session_path = self.gallery_path / timestamp
         session_path.mkdir(parents=True, exist_ok=True)
         self.current_session = session_path
-        logger.info(f"📂 Session created: {timestamp}")
+        logger.info(f"📂 Session: {timestamp}")
         return session_path
-    
-    def save_metadata(self, voice_text: str, prompt: str, generated_image_url: str = None):
-        """Save interaction metadata."""
+
+    def save_metadata(self, voice_text: str, category: str, sketch_path: str):
         metadata = {
             "timestamp": datetime.now().isoformat(),
             "voice_transcription": voice_text,
-            "ai_prompt": prompt,
-            "image_url": generated_image_url or "local",
+            "quickdraw_category": category,
+            "sketch_path": sketch_path,
         }
-        
         metadata_path = self.current_session / "metadata.json"
-        with open(metadata_path, 'w') as f:
+        with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2)
-        
-        logger.info(f"💾 Metadata saved")
-    
+        logger.info("💾 Metadata saved")
+
     def cleanup_old_entries(self):
-        """Delete old gallery entries based on config."""
-        
         if not self.gallery_path.exists():
             return
-        
-        entries = list(self.gallery_path.iterdir())
-        
-        # Delete by age
         cutoff_time = datetime.now() - timedelta(hours=config.MAX_GALLERY_AGE_HOURS)
+        entries = list(self.gallery_path.iterdir())
         for entry in entries:
+            if not entry.is_dir():
+                continue
             try:
-                # Parse timestamp from folder name
                 timestamp = datetime.strptime(entry.name, "%Y-%m-%d_%H-%M-%S")
                 if timestamp < cutoff_time:
                     shutil.rmtree(entry)
                     logger.info(f"🗑️  Deleted old entry: {entry.name}")
             except ValueError:
-                # Skip folders that don't match timestamp format
                 pass
-        
-        # Keep only most recent N entries
-        entries = sorted(self.gallery_path.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+        entries = sorted(
+            [e for e in self.gallery_path.iterdir() if e.is_dir()],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
         if len(entries) > config.MAX_GALLERY_ENTRIES:
             for old_entry in entries[config.MAX_GALLERY_ENTRIES:]:
                 shutil.rmtree(old_entry)
                 logger.info(f"🗑️  Deleted (limit exceeded): {old_entry.name}")
-    
+
     def run_single_interaction(self) -> bool:
-        """
-        Simplified interaction: just voice → image generation.
-        
-        Returns:
-            True if successful, False if error
-        """
-        
         try:
-            # Create session
             self.create_session()
-            
-            # Show welcome (button-controlled, no timer)
+
+            # Welcome screen
             self.gallery_display.show_welcome_screen()
-            
-            # Capture ONLY voice (no drawing)
+
+            # Voice capture (with animated listening indicator)
             logger.info("📥 Capturing voice input...")
             voice_text = self.input_manager.voice_capture.capture()
-            
+
             if not voice_text or voice_text.startswith("["):
-                logger.warning(f"⚠️  Voice input failed or empty: {voice_text}")
+                logger.warning(f"⚠️  Voice input failed: {voice_text}")
                 return False
-            
+
             logger.info(f"✅ Voice captured: '{voice_text}'")
-            
-            # Use voice text directly as the prompt
-            logger.info("🎨 Sending to flux-fast...")
-            generated_image_url = self.api_client.generate_image(voice_text)
-            
-            if not generated_image_url:
-                logger.error("❌ Image generation failed")
+
+            # Generate Quick Draw sketch
+            logger.info("✏️  Generating Quick Draw sketch...")
+            result = self.renderer.generate(voice_text)
+
+            if not result:
+                logger.error("❌ Sketch generation failed")
                 return False
-            
-            # Display generated image
-            logger.info("🎬 Animating result...")
-            generated_path = self.display.display_generated_image(
-                generated_image_url,
-                duration=config.ANIMATION_DURATION
+
+            logger.info(f"🎨 Category matched: '{result['category']}'")
+
+            # Animate stroke-by-stroke reveal
+            logger.info("🎬 Animating sketch...")
+            self.display.display_generated_image(
+                image_path=result["image_path"],
+                duration=config.ANIMATION_DURATION,
+                strokes=result["strokes"],
             )
-            
-            # Save metadata
-            self.save_metadata(voice_text, voice_text, generated_image_url)
-            
+
+            # Copy sketch to session folder
+            sketch_dest = self.current_session / "generated.png"
+            import shutil as _sh
+            _sh.copy(result["image_path"], sketch_dest)
+
+            self.save_metadata(voice_text, result["category"], str(sketch_dest))
             logger.info("✅ Interaction complete!")
             return True
-        
+
         except Exception as e:
             logger.error(f"❌ Error during interaction: {e}", exc_info=True)
             return False
-    
+
     def run(self):
-        """Main loop."""
-        
         logger.info("=" * 60)
-        logger.info("SYNTHETIC RELIC - LOCAL TEST MODE")
+        logger.info("SYNTHETIC RELIC")
         logger.info("=" * 60)
-        logger.info("")
         logger.info("Instructions:")
-        logger.info("1. A drawing canvas will appear - draw for 15 seconds")
-        logger.info("2. Allow microphone access for voice input (10 seconds)")
-        logger.info("3. AI will generate an image from your drawing + description")
-        logger.info("4. Generated image will animate on screen")
-        logger.info("5. Gallery slideshow of recent creations")
+        logger.info("1. Click 'Click to Start' on the welcome screen")
+        logger.info("2. Speak a word or phrase describing something")
+        logger.info("3. Watch a Quick Draw sketch appear stroke by stroke")
         logger.info("")
         logger.info("Press Ctrl+C to exit")
         logger.info("=" * 60)
-        logger.info("")
-        
+
         cycle_count = 0
-        
+
         try:
             while True:
                 cycle_count += 1
-                logger.info(f"\n🔄 Cycle {cycle_count} starting...")
-                
-                # Run interaction
+                logger.info(f"\n🔄 Cycle {cycle_count}...")
+
                 success = self.run_single_interaction()
-                
+
                 if success:
-                    # Show gallery
                     logger.info("📺 Showing gallery...")
                     self.gallery_display.show_gallery(duration=config.GALLERY_DISPLAY_DURATION)
-                
-                # Cleanup periodically
+
                 if cycle_count % 5 == 0:
-                    logger.info("🧹 Cleaning up old entries...")
                     self.cleanup_old_entries()
-                
-                # Brief pause before next cycle
+
                 logger.info("⏳ Ready for next interaction in 2 seconds...\n")
                 time.sleep(2)
-        
+
         except KeyboardInterrupt:
-            logger.info("\n\n👋 Shutting down...")
+            logger.info("\n👋 Shutting down.")
             logger.info(f"Gallery saved to: {self.gallery_path}")
-            logger.info("Goodbye!")

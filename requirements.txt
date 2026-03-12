@@ -1,7 +1,8 @@
-replicate>=1.0.7
+quickdraw>=0.1.1
 pillow>=10.1.0
 opencv-python>=4.8.1.78
 SpeechRecognition>=3.10.0
 pydub>=0.25.1
 requests>=2.31.0
 numpy>=1.26.0
+pyaudio>=0.2.11
